@@ -1,0 +1,84 @@
+name: Automatic Rebase
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  rebase-on-main-push:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Rebase All Open PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Configure Git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Fetch all PRs
+          PR_JSON=$(gh pr list --state open --json number,headRefName)
+          
+          echo "$PR_JSON" | jq -c '.[]' | while read i; do
+            PR_NUMBER=$(echo "$i" | jq -r '.number')
+            BRANCH_NAME=$(echo "$i" | jq -r '.headRefName')
+            
+            echo "Processing PR #$PR_NUMBER for branch $BRANCH_NAME..."
+            
+            git fetch origin "$BRANCH_NAME"
+            git checkout "$BRANCH_NAME"
+            
+            # Attempt rebase
+            if git rebase origin/main; then
+              echo "Rebase successful. Force pushing..."
+              git push origin "$BRANCH_NAME" --force-with-lease
+              gh pr comment "$PR_NUMBER" --body "✅ Automatically rebased on latest \`main\`."
+            else
+              echo "Rebase failed due to conflicts."
+              git rebase --abort
+              gh pr comment "$PR_NUMBER" --body "⚠️ Automatic rebase failed due to merge conflicts. Please resolve manually."
+            fi
+          done
+
+  rebase-on-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Rebase Current PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          if git rebase origin/main; then
+            echo "Rebase successful. Checking if push is needed..."
+            # Only push if we actually rebased (i.e. we are ahead of the origin branch)
+            if [ -n "$(git status --porcelain)" ] || [ -n "$(git log @{u}..)" ]; then
+              git push origin HEAD --force-with-lease
+              gh pr comment ${{ github.event.pull_request.number }} --body "✅ Automatically rebased on latest \`main\`."
+            else
+              echo "Already up-to-date with main, nothing to push."
+            fi
+          else
+            echo "Rebase failed due to conflicts."
+            git rebase --abort
+            gh pr comment ${{ github.event.pull_request.number }} --body "⚠️ Automatic rebase failed due to merge conflicts. Please resolve manually."
+          fi
